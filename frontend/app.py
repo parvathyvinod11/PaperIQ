@@ -11,7 +11,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import io
-
+from fpdf import FPDF
 # ─────────────────────────────────────────────
 # Page config
 # ─────────────────────────────────────────────
@@ -173,6 +173,72 @@ st.markdown("""
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
+
+def generate_pdf_report(data: dict) -> bytes:
+    class PDF(FPDF):
+        def header(self):
+            self.set_font('helvetica', 'B', 15)
+            self.set_fill_color(22, 33, 62)
+            self.set_text_color(255, 255, 255)
+            self.cell(0, 15, 'PaperIQ Analysis Report', fill=True, align='C')
+            self.ln(20)
+            self.set_text_color(0, 0, 0)
+            
+        def footer(self):
+            self.set_y(-15)
+            self.set_font('helvetica', 'I', 8)
+            self.set_text_color(128, 128, 128)
+            self.cell(0, 10, f'Page {self.page_no()}', align='C')
+
+        def chapter_title(self, title):
+            self.set_font('helvetica', 'B', 12)
+            self.set_fill_color(240, 240, 240)
+            self.cell(0, 10, title.encode('latin-1', 'replace').decode('latin-1'), fill=True)
+            self.ln(12)
+
+        def chapter_body(self, text):
+            self.set_font('helvetica', '', 11)
+            text = text.encode('latin-1', 'replace').decode('latin-1')
+            self.multi_cell(0, 6, text)
+            self.ln(8)
+
+    pdf = PDF()
+    pdf.add_page()
+    
+    title = data.get("title", "Untitled Paper")
+    pdf.set_font('helvetica', 'B', 14)
+    pdf.multi_cell(0, 8, f"Title: {title.encode('latin-1', 'replace').decode('latin-1')}")
+    pdf.ln(5)
+    
+    summaries = data.get("summaries", {})
+    if summaries.get("overall"):
+        pdf.chapter_title('Overall Summary')
+        pdf.chapter_body(summaries['overall'])
+        
+    kws = data.get("keywords", {}).get("top_keywords", [])
+    if kws:
+        pdf.chapter_title('Top Keywords')
+        kw_str = ", ".join([k['keyword'] for k in kws])
+        pdf.chapter_body(kw_str)
+
+    gaps = data.get("gaps", {}).get("identified_gaps", [])
+    if gaps:
+        pdf.chapter_title('Research Gaps')
+        gaps_str = chr(10).join([f"- {g}" for g in gaps])
+        pdf.chapter_body(gaps_str)
+
+    ideas = data.get("ideas", {})
+    all_ideas = []
+    
+    for i_list in [ideas.get("research_extensions", []), ideas.get("implementation_projects", []), ideas.get("dataset_ideas", [])]:
+        for idx in i_list:
+            all_ideas.append(f"- {idx}")
+            
+    if all_ideas:
+        pdf.chapter_title('Research Ideas & Suggestions')
+        pdf.chapter_body(chr(10).join(all_ideas))
+
+    return bytes(pdf.output())
 
 def check_api():
     try:
@@ -562,6 +628,17 @@ def render_analysis(data: dict):
             <div class="label">Research Domain</div></div>""", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
+    
+    col_dl1, col_dl2 = st.columns([8, 2])
+    with col_dl2:
+        pdf_bytes = generate_pdf_report(data)
+        st.download_button(
+            label="📄 Download PDF Report",
+            data=pdf_bytes,
+            file_name=f"PaperIQ_Report_{title[:15].replace(' ', '_').replace(':', '')}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
 
     # ── Tabs ──
     tabs = st.tabs([

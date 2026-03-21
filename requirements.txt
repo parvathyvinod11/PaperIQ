@@ -38,6 +38,7 @@ networkx==3.2.1
 
 # Frontend
 streamlit==1.33.0
+fpdf2==2.7.9
 
 # Utilities
 requests==2.31.0

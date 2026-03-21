@@ -72,6 +72,43 @@ class PDFProcessor:
         text = text.strip()
         return text
 
+    def _extract_title_heuristics(self, pdf_bytes: bytes) -> str:
+        """Extract title by finding the largest text on the first page."""
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            if doc.page_count == 0:
+                return ""
+            page = doc[0]
+            blocks = page.get_text("dict").get("blocks", [])
+            
+            max_size = 0
+            title_text = ""
+            
+            for b in blocks:
+                if b.get("type") == 0:  # text block
+                    for l in b.get("lines", []):
+                        for s in l.get("spans", []):
+                            text = s.get("text", "").strip()
+                            size = s.get("size", 0)
+                            if not text:
+                                continue
+                            
+                            # If we find a larger font, reset the title
+                            if size > max_size + 0.1:  # add small epsilon for float comparison
+                                max_size = size
+                                title_text = text
+                            # If it's the same font size (continuation of the title)
+                            elif abs(size - max_size) <= 0.1:
+                                title_text += " " + text
+            doc.close()
+            
+            if title_text and len(title_text) > 8:
+                return " ".join(title_text.split())
+        except Exception as e:
+            print(f"Title extraction heuristics failed: {e}")
+            
+        return ""
+
     def process(self, pdf_bytes: bytes) -> dict:
         """Full processing pipeline: extract + clean text."""
         metadata = self.get_metadata(pdf_bytes)
@@ -84,13 +121,20 @@ class PDFProcessor:
 
         cleaned_text = self.clean_text(raw_text)
 
-        if not metadata.get("title") or "Untitled" in metadata.get("title", ""):
-            # Heuristic: the first non-empty lengthy line of a paper is usually its title
-            for line in raw_text.split('\n'):
-                line_clean = line.strip()
-                if line_clean and len(line_clean) > 8:
-                    metadata["title"] = line_clean
-                    break
+        # Better Title Extraction
+        title = metadata.get("title", "")
+        # If metadata title is missing, generic, or just the filename without a proper title
+        if not title or "Untitled" in title or title.endswith(".pdf") or "Microsoft Word" in title:
+            heuristic_title = self._extract_title_heuristics(pdf_bytes)
+            if heuristic_title:
+                metadata["title"] = heuristic_title
+            else:
+                # Fallback backward compatibility:
+                for line in raw_text.split('\n'):
+                    line_clean = line.strip()
+                    if line_clean and len(line_clean) > 8:
+                        metadata["title"] = line_clean
+                        break
 
         return {
             "metadata": metadata,
