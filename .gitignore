@@ -10,3 +10,6 @@ start_frontend.ps1
 # python cache
 __pycache__/
 *.pyc
+
+# environment variables (contains secrets/API keys)
+.env

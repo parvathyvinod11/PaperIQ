@@ -4,6 +4,8 @@ Converts paper insights into student project ideas and research extensions.
 """
 
 import re
+import os
+import json
 from typing import Dict, List
 
 
@@ -24,6 +26,43 @@ IDEA_TEMPLATES = [
 class IdeaGenerator:
     def __init__(self):
         pass
+
+    def _gemini_generate_ideas(self, domain: str, keyword_data: Dict, gaps: List[str], text_sample: str) -> Dict:
+        """Use Gemini to generate creative context-aware research ideas."""
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            return {}
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            
+            methods = self._extract_methods(keyword_data)
+            method_str = ", ".join(methods)
+            gaps_str = "\n".join(f"- {g}" for g in gaps[:3]) if gaps else "None provided."
+            
+            prompt = f"""You are an expert AI research advisor. Based on the following context, generate highly specific and creative research ideas for a student or researcher.
+Domain: {domain}
+Key Methods/Algorithms: {method_str}
+Identified Gaps:
+{gaps_str}
+
+Paper Abstract/Intro Sample:
+{text_sample[:3000]}
+
+Return ONLY a valid JSON object with the following keys, containing lists of string ideas:
+"research_extensions": 6 advanced ideas building on the paper.
+"gap_based_ideas": 3 ideas explicitly addressing the gaps.
+"implementation_projects": 4 practical software engineering or replication projects.
+"dataset_ideas": 3 ideas related to collecting or modifying datasets.
+"""
+            response = model.generate_content(prompt)
+            match = re.search(r"\{.*\}", response.text.strip(), re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            return {}
+        except Exception:
+            return {}
 
     def _extract_methods(self, keyword_data: Dict) -> List[str]:
         entities = keyword_data.get("entities", {})
@@ -61,7 +100,13 @@ class IdeaGenerator:
         metric = metrics[0] if metrics else "accuracy"
         application = domain.lower()
 
-        # Generate templated ideas
+        # Try Gemini first for extremely high quality ideas
+        text_sample = sections.get("abstract", "") + "\n" + sections.get("introduction", "")
+        gemini_ideas = self._gemini_generate_ideas(domain, keyword_data, gaps, text_sample)
+        if gemini_ideas and isinstance(gemini_ideas, dict) and "research_extensions" in gemini_ideas:
+            return gemini_ideas
+
+        # Fallback to templated ideas
         ideas = []
         for tmpl in IDEA_TEMPLATES[:6]:
             idea = tmpl.format(

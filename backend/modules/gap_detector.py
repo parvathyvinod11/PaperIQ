@@ -4,6 +4,8 @@ Detects potential research gaps by analyzing limitations and unsolved problems.
 """
 
 import re
+import os
+import json
 from typing import List, Dict
 
 import nltk
@@ -45,6 +47,37 @@ class GapDetector:
         self.gap_patterns = [re.compile(p, re.IGNORECASE) for p in GAP_PATTERNS]
         self.future_patterns = [re.compile(p, re.IGNORECASE) for p in FUTURE_PATTERNS]
 
+    def _gemini_detect_gaps(self, text: str) -> Dict:
+        """Use Gemini to intelligently extract gaps and future directions."""
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            return {}
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            
+            prompt = f"""Analyze the following research paper text and identify:
+1. Research Gaps / Limitations explicitly mentioned.
+2. Future Directions proposed.
+
+Return ONLY a valid JSON object with exactly these keys:
+"identified_gaps": A list of up to 4 string sentences.
+"future_directions": A list of up to 4 string sentences.
+"limitations": A list of up to 4 string sentences.
+
+Text:
+{text[:15000]}
+"""
+            response = model.generate_content(prompt)
+            # Find JSON block in response
+            match = re.search(r"\{.*\}", response.text.strip(), re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            return {}
+        except Exception:
+            return {}
+
     def _matches(self, sentence: str, patterns: List) -> bool:
         return any(p.search(sentence) for p in patterns)
 
@@ -60,6 +93,20 @@ class GapDetector:
         if not target_text.strip():
             target_text = text[:6000]
 
+        # Try Gemini first for intelligent extraction
+        gemini_gaps = self._gemini_detect_gaps(target_text)
+        if gemini_gaps and isinstance(gemini_gaps, dict) and "identified_gaps" in gemini_gaps:
+            identified = gemini_gaps.get("identified_gaps", [])
+            future = gemini_gaps.get("future_directions", [])
+            lims = gemini_gaps.get("limitations", [])
+            return {
+                "identified_gaps": identified,
+                "future_directions": future,
+                "limitations": lims,
+                "gap_count": len(identified),
+            }
+
+        # Fallback to manual regex parsing
         sentences = sent_tokenize(target_text)
 
         gap_sentences = []

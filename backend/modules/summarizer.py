@@ -1,9 +1,10 @@
 """
 Paper Summarization Module
 Extractive summarization using sentence scoring (TF-IDF + position weighting).
-Optionally uses HuggingFace BART/T5 for abstractive summarization.
+Optionally uses Google Gemini API for high-quality abstractive summarization.
 """
 
+import os
 import re
 import math
 from typing import Dict, List, Optional
@@ -23,8 +24,24 @@ for pkg in ["punkt", "stopwords", "punkt_tab"]:
 class Summarizer:
     def __init__(self):
         self.stop_words = set(stopwords.words("english"))
-        self._abstractive_model = None
-        self._abstractive_tokenizer = None
+
+    def _gemini_summarize(self, text: str, context_type: str = "section") -> Optional[str]:
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            return None
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            
+            prompt = (
+                f"Provide a concise, academic summary of the following research paper {context_type}. "
+                f"Be direct and informative.\n\n{text[:15000]}"
+            )
+            response = model.generate_content(prompt)
+            return response.text.strip()
+        except Exception:
+            return None
 
     def _score_sentences(self, sentences: List[str], top_n: int = 5) -> List[str]:
         """Score sentences using TF-IDF-like approach and position weighting."""
@@ -89,7 +106,11 @@ class Summarizer:
         for section, top_n in section_configs.items():
             content = sections.get(section, "")
             if content and len(content.split()) > 50:
-                summaries[section] = self.extractive_summarize(content, top_n=top_n)
+                gemini_summary = self._gemini_summarize(content, context_type=f"'{section}' section")
+                if gemini_summary:
+                    summaries[section] = gemini_summary
+                else:
+                    summaries[section] = self.extractive_summarize(content, top_n=top_n)
             else:
                 summaries[section] = content
 
@@ -99,7 +120,12 @@ class Summarizer:
             sections.get("conclusion", ""),
             sections.get("results", ""),
         ])
-        summaries["overall"] = self.extractive_summarize(overall_text, top_n=8)
+        
+        gemini_overall = self._gemini_summarize(overall_text, context_type="key findings (provide an overall summary)")
+        if gemini_overall:
+            summaries["overall"] = gemini_overall
+        else:
+            summaries["overall"] = self.extractive_summarize(overall_text, top_n=8)
 
         return summaries
 

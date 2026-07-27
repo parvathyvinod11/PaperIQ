@@ -164,8 +164,76 @@ st.markdown("""
     stTabs [data-baseweb="tab"] {
         color: #8892b0;
     }
-    stTabs [aria-selected="true"] {
-        color: #e94560 !important;
+    /* Chat bubble styles */
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        padding: 0.5rem 0;
+    }
+    .chat-bubble {
+        max-width: 82%;
+        padding: 0.85rem 1.2rem;
+        border-radius: 18px;
+        font-size: 0.92rem;
+        line-height: 1.6;
+        animation: fadeInUp 0.25s ease;
+    }
+    @keyframes fadeInUp {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    .user-bubble {
+        background: linear-gradient(135deg, #e94560, #c62a47);
+        color: #fff;
+        align-self: flex-end;
+        margin-left: auto;
+        border-bottom-right-radius: 4px;
+    }
+    .bot-bubble {
+        background: #1a2540;
+        border: 1px solid #2d3f6b;
+        color: #ccd6f6;
+        align-self: flex-start;
+        border-bottom-left-radius: 4px;
+    }
+    .bot-bubble b { color: #e94560; }
+    .chat-avatar {
+        font-size: 1.1rem;
+        margin-bottom: 2px;
+    }
+    .chat-row-user { display: flex; justify-content: flex-end; align-items: flex-end; gap: 0.5rem; }
+    .chat-row-bot  { display: flex; justify-content: flex-start; align-items: flex-end; gap: 0.5rem; }
+    .mode-badge {
+        display: inline-block;
+        font-size: 0.7rem;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-weight: 600;
+        margin-left: 8px;
+        vertical-align: middle;
+    }
+    .badge-gemini  { background: #1a3a5c; color: #64b5f6; border: 1px solid #1565c0; }
+    .badge-fallback{ background: #2a1a0a; color: #ffb74d; border: 1px solid #e65100; }
+    .suggest-btn {
+        display: inline-block;
+        background: #12192d;
+        border: 1px solid #2d3f6b;
+        border-radius: 20px;
+        color: #8892b0;
+        padding: 4px 14px;
+        font-size: 0.8rem;
+        margin: 3px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .suggest-btn:hover { border-color: #e94560; color: #e94560; }
+    .chat-input-area {
+        background: #12192d;
+        border: 1px solid #2d3f6b;
+        border-radius: 12px;
+        padding: 1rem;
+        margin-top: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -433,15 +501,63 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.divider()
+
+    # ── RBAC: determine available modes based on role ──
+    _ROLE_LEVEL = {"Student": 1, "Other": 1, "Professional": 2, "Researcher": 2, "Professor": 3}
+    _ROLE_LABEL = {1: ("Basic", "#8892b0"), 2: ("Standard", "#64b5f6"), 3: ("Premium", "#ffd700")}
+
+    _current_role  = st.session_state.get("role") or "Student"
+    _current_level = _ROLE_LEVEL.get(_current_role, 1)
+
+    # (mode label, minimum level required)
+    _ALL_MODES = [
+        ("📄 Single Paper Analysis", 1),
+        ("💬 Paper Chat",            1),
+        ("📚 Multi-Paper Comparison", 2),
+        ("🔍 Semantic Search",       2),
+        ("🕒 History",               1),
+    ]
+
+    _available = [m for m, lvl in _ALL_MODES if _current_level >= lvl]
+    _locked    = [(m, lvl) for m, lvl in _ALL_MODES if _current_level < lvl]
+
     mode = st.radio(
         "**Analysis Mode**",
-        ["📄 Single Paper Analysis", "📚 Multi-Paper Comparison", "🔍 Semantic Search", "🕒 History"],
+        _available,
         label_visibility="visible",
     )
+
+    # Show locked modes with lock icon
+    if _locked:
+        _req_role_name = {2: "Researcher / Professional", 3: "Professor"}  
+        for locked_mode, req_lvl in _locked:
+            req_label = _req_role_name.get(req_lvl, "higher role")
+            st.markdown(
+                f'<div style="color:#4a5568; font-size:0.82rem; padding:4px 0 4px 8px;">'
+                f'🔒 {locked_mode}<br>'
+                f'<span style="font-size:0.75rem; color:#2d3f6b;">Requires: {req_label}</span></div>',
+                unsafe_allow_html=True,
+            )
+
     st.divider()
 
     if st.session_state["token"]:
-        st.success(f"👤 Logged in as {st.session_state['username']} ({st.session_state['role']})")
+        # Role badge colour
+        _badge_color, _badge_bg = {
+            1: ("#8892b0", "#1a1a2e"),
+            2: ("#64b5f6", "#0d1b2a"),
+            3: ("#ffd700", "#1a1500"),
+        }.get(_current_level, ("#8892b0", "#1a1a2e"))
+        _tier_label = _ROLE_LABEL.get(_current_level, ("Basic", "#8892b0"))[0]
+
+        st.markdown(
+            f'<div style="background:{_badge_bg}; border:1px solid {_badge_color}; '
+            f'border-radius:8px; padding:0.6rem 0.9rem; margin-bottom:0.5rem;">'
+            f'<span style="color:#ccd6f6; font-size:0.88rem;">👤 <b>{st.session_state["username"]}</b></span><br>'
+            f'<span style="color:{_badge_color}; font-size:0.78rem;">'
+            f'{st.session_state["role"]} &nbsp;·&nbsp; {_tier_label} Tier</span></div>',
+            unsafe_allow_html=True,
+        )
         if st.button("Logout"):
             st.session_state["token"] = None
             st.session_state["username"] = None
@@ -941,6 +1057,180 @@ def render_search():
 
 
 # ─────────────────────────────────────────────
+# Mode: Paper Chat
+# ─────────────────────────────────────────────
+
+SUGGESTED_QUESTIONS = [
+    "What is this paper about?",
+    "What methodology was used?",
+    "What are the key contributions?",
+    "What are the research gaps?",
+    "What results were achieved?",
+    "Suggest future research ideas",
+    "What domain does this paper belong to?",
+    "What is the quality score?",
+]
+
+
+def render_chat():
+    st.markdown('<div class="section-title">💬 Chat with Your Paper</div>', unsafe_allow_html=True)
+
+    # Check if a paper has been analyzed
+    if "analysis" not in st.session_state or not st.session_state["analysis"]:
+        st.markdown("""
+        <div style="background:#12192d; border:1px solid #2d3f6b; border-radius:12px;
+                    padding:2rem; text-align:center; color:#8892b0;">
+            <div style="font-size:3rem; margin-bottom:1rem;">🤖</div>
+            <h3 style="color:#ccd6f6;">No Paper Analyzed Yet</h3>
+            <p>Go to <b>📄 Single Paper Analysis</b> first, upload and analyze a paper,<br>
+               then come back here to chat with it!</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # Ensure chat history exists
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+    if "chat_mode" not in st.session_state:
+        st.session_state["chat_mode"] = "fallback"
+
+    analysis = st.session_state["analysis"]
+    paper_title = analysis.get("title", "Your Paper")
+
+    # Paper context info bar
+    domain = analysis.get("domain", {}).get("primary_domain", "N/A")
+    score  = analysis.get("quality", {}).get("composite_score", "N/A")
+    st.markdown(f"""
+    <div style="background:#0d1424; border:1px solid #1e3a5f; border-radius:10px;
+                padding:0.8rem 1.2rem; margin-bottom:1rem;
+                display:flex; align-items:center; gap:1rem;">
+        <span style="font-size:1.5rem;">📄</span>
+        <div>
+            <div style="color:#e0e0e0; font-weight:600; font-size:0.95rem;">{paper_title[:80]}</div>
+            <div style="color:#8892b0; font-size:0.8rem;">{domain} &nbsp;|&nbsp; Quality: {score}/100</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # AI capability info
+    st.info("The backend will automatically use its configured LLM (if available via .env) to provide intelligent answers.", icon="🤖")
+
+    st.divider()
+
+    # Suggested question chips
+    if not st.session_state["chat_history"]:
+        st.markdown('<p style="color:#8892b0; font-size:0.85rem; margin-bottom:0.5rem;">💡 Try asking:</p>', unsafe_allow_html=True)
+        cols = st.columns(4)
+        for i, q in enumerate(SUGGESTED_QUESTIONS):
+            with cols[i % 4]:
+                if st.button(q, key=f"suggest_{i}", use_container_width=True):
+                    st.session_state["_pending_question"] = q
+                    st.rerun()
+
+    # Handle any pending questions from suggestion buttons
+    pending = st.session_state.pop("_pending_question", None)
+
+    # ── Chat history display ──
+    chat_history = st.session_state["chat_history"]
+    if chat_history:
+        chat_html = '<div class="chat-container">'
+        for msg in chat_history:
+            if msg["role"] == "user":
+                chat_html += f"""
+                <div class="chat-row-user">
+                    <div class="chat-bubble user-bubble">{msg['content']}</div>
+                    <div class="chat-avatar">👤</div>
+                </div>"""
+            else:
+                mode_label = msg.get("mode", "fallback")
+                badge_class = "badge-gemini" if mode_label == "gemini" else "badge-fallback"
+                badge_text  = "✨ Gemini" if mode_label == "gemini" else "⚡ Built-in"
+                # Convert markdown-ish **bold** to <b> tags for HTML display
+                content = msg["content"].replace("**", "<b>", 1)
+                import re as _re
+                content = _re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", content)
+                content = content.replace("\n", "<br>")
+                content = content.replace("• ", "&bull; ")
+                chat_html += f"""
+                <div class="chat-row-bot">
+                    <div class="chat-avatar">🤖</div>
+                    <div class="chat-bubble bot-bubble">
+                        <span class="mode-badge {badge_class}">{badge_text}</span><br><br>
+                        {content}
+                    </div>
+                </div>"""
+        chat_html += "</div>"
+        st.markdown(chat_html, unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Input form ──
+    with st.form("chat_form", clear_on_submit=True):
+        col_inp, col_send = st.columns([5, 1])
+        with col_inp:
+            user_input = st.text_input(
+                "Ask anything about the paper...",
+                value="",
+                placeholder="e.g. What are the main contributions of this paper?",
+                label_visibility="collapsed",
+            )
+        with col_send:
+            submitted = st.form_submit_button("Send 🚀", use_container_width=True, type="primary")
+
+    if (submitted and user_input.strip()) or pending:
+        question = pending if pending else user_input.strip()
+
+        # Append user message
+        st.session_state["chat_history"].append({"role": "user", "content": question})
+
+        with st.spinner("🤖 Thinking..."):
+            try:
+                import os
+                # Pass current env key to backend via header or just call backend
+                payload = {
+                    "question": question,
+                    "paper_context": analysis,
+                    "chat_history": [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in st.session_state["chat_history"][:-1]  # exclude current
+                    ],
+                }
+                resp = requests.post(
+                    f"{API_BASE}/api/chat",
+                    json=payload,
+                    timeout=30,
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    answer = result.get("answer", "Sorry, I couldn't generate a response.")
+                    mode   = result.get("mode", "fallback")
+                else:
+                    answer = f"Error {resp.status_code}: {resp.text[:200]}"
+                    mode   = "fallback"
+            except requests.exceptions.ConnectionError:
+                answer = "❌ Cannot connect to the backend API. Please make sure it's running."
+                mode   = "fallback"
+            except Exception as e:
+                answer = f"❌ Error: {str(e)}"
+                mode   = "fallback"
+
+        st.session_state["chat_history"].append({
+            "role": "assistant",
+            "content": answer,
+            "mode": mode,
+        })
+        st.rerun()
+
+    # Clear chat button
+    if chat_history:
+        st.markdown("<br>", unsafe_allow_html=True)
+        col_clr1, col_clr2, col_clr3 = st.columns([3, 1, 3])
+        with col_clr2:
+            if st.button("🗑️ Clear Chat", use_container_width=True):
+                st.session_state["chat_history"] = []
+                st.rerun()
+
+
+# ─────────────────────────────────────────────
 # Route by mode
 # ─────────────────────────────────────────────
 
@@ -988,6 +1278,8 @@ if not st.session_state["token"]:
 else:
     if mode == "📄 Single Paper Analysis":
         render_single_paper()
+    elif mode == "💬 Paper Chat":
+        render_chat()
     elif mode == "📚 Multi-Paper Comparison":
         render_multi_paper()
     elif mode == "🔍 Semantic Search":

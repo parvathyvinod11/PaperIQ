@@ -5,9 +5,19 @@ Main application entry point exposing REST APIs.
 
 import sys
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+# Try finding one level up if in backend folder, or in current dir
+env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+if os.path.exists(env_path):
+    load_dotenv(env_path)
+else:
+    load_dotenv()
+
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -20,7 +30,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from routers.auth import router as auth_router
 from routers.history import router as history_router
 from database import history_collection
-from auth_utils import get_current_user_optional
+from auth_utils import get_current_user_optional, require_min_role
 
 from modules.pdf_processor import PDFProcessor
 from modules.text_preprocessor import TextPreprocessor
@@ -35,6 +45,7 @@ from modules.trend_analyzer import TrendAnalyzer
 from modules.quality_scorer import QualityScorer
 from modules.idea_generator import IdeaGenerator
 from modules.paper_comparator import PaperComparator
+from modules.llm_chat import chat_with_paper
 
 # ──────────────────────────────────────────────────────────
 # App setup
@@ -208,9 +219,13 @@ async def analyze_paper(
 
 
 @app.post("/api/compare")
-async def compare_papers(files: List[UploadFile] = File(...)):
+async def compare_papers(
+    files: List[UploadFile] = File(...),
+    user: dict = Depends(require_min_role("Researcher")),
+):
     """
     Upload multiple PDFs and get a comparison report.
+    Requires: Researcher, Professional, or Professor role.
     """
     if len(files) < 2:
         raise HTTPException(status_code=400, detail="Please upload at least 2 papers.")
@@ -244,8 +259,13 @@ async def compare_papers(files: List[UploadFile] = File(...)):
 
 
 @app.post("/api/similarity")
-async def compute_similarity(files: List[UploadFile] = File(...)):
-    """Compute pairwise semantic similarity between uploaded papers."""
+async def compute_similarity(
+    files: List[UploadFile] = File(...),
+    user: dict = Depends(require_min_role("Researcher")),
+):
+    """Compute pairwise semantic similarity between uploaded papers.
+    Requires: Researcher, Professional, or Professor role.
+    """
     if len(files) < 2:
         raise HTTPException(status_code=400, detail="Need at least 2 PDFs.")
 
@@ -263,8 +283,11 @@ async def compute_similarity(files: List[UploadFile] = File(...)):
 async def semantic_search(
     query: str = Form(...),
     files: List[UploadFile] = File(...),
+    user: dict = Depends(require_min_role("Researcher")),
 ):
-    """Search across uploaded papers using a natural language query."""
+    """Search across uploaded papers using a natural language query.
+    Requires: Researcher, Professional, or Professor role.
+    """
     corpus_texts = []
     titles = []
     for f in files:
@@ -280,6 +303,38 @@ async def semantic_search(
         reverse=True,
     )
     return JSONResponse(content={"query": query, "results": results})
+
+
+# ──────────────────────────────────────────────────────────
+# Chat endpoint
+# ──────────────────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    question: str
+    paper_context: dict
+    chat_history: Optional[List[dict]] = []
+
+
+@app.post("/api/chat")
+async def chat_endpoint(req: ChatRequest):
+    """
+    Ask a question about a previously analyzed paper.
+    Requires the full analysis result (paper_context) and optionally prior chat history.
+    """
+    if not req.question or not req.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+    if not req.paper_context:
+        raise HTTPException(status_code=400, detail="paper_context is required.")
+
+    try:
+        result = chat_with_paper(
+            question=req.question.strip(),
+            paper_context=req.paper_context,
+            chat_history=req.chat_history or [],
+        )
+        return JSONResponse(content=result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
 
 if __name__ == "__main__":
