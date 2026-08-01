@@ -214,6 +214,7 @@ st.markdown("""
         vertical-align: middle;
     }
     .badge-gemini  { background: #1a3a5c; color: #64b5f6; border: 1px solid #1565c0; }
+    .badge-rag     { background: #0d2b1a; color: #69f0ae; border: 1px solid #1b5e20; font-family: monospace; }
     .badge-fallback{ background: #2a1a0a; color: #ffb74d; border: 1px solid #e65100; }
     .suggest-btn {
         display: inline-block;
@@ -1143,12 +1144,22 @@ def render_chat():
                 </div>"""
             else:
                 mode_label = msg.get("mode", "fallback")
-                badge_class = "badge-gemini" if mode_label == "gemini" else "badge-fallback"
-                badge_text  = "✨ Gemini" if mode_label == "gemini" else "⚡ Built-in"
+                ret_chunks = msg.get("retrieved_chunks", 0)
+                tot_chunks = msg.get("total_chunks", 0)
+                is_rag = mode_label == "rag-gemini"
+                is_gemini = mode_label == "gemini"   # legacy
+                if is_rag:
+                    badge_class = "badge-rag"
+                    badge_text  = f"🔍 RAG · Gemini &nbsp;|&nbsp; {ret_chunks}/{tot_chunks} chunks"
+                elif is_gemini:
+                    badge_class = "badge-gemini"
+                    badge_text  = "✨ Gemini"
+                else:
+                    badge_class = "badge-fallback"
+                    badge_text  = "⚡ Built-in"
                 # Convert markdown-ish **bold** to <b> tags for HTML display
-                content = msg["content"].replace("**", "<b>", 1)
                 import re as _re
-                content = _re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", content)
+                content = _re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", msg["content"])
                 content = content.replace("\n", "<br>")
                 content = content.replace("• ", "&bull; ")
                 chat_html += f"""
@@ -1200,23 +1211,33 @@ def render_chat():
                     timeout=30,
                 )
                 if resp.status_code == 200:
-                    result = resp.json()
-                    answer = result.get("answer", "Sorry, I couldn't generate a response.")
-                    mode   = result.get("mode", "fallback")
+                    result          = resp.json()
+                    answer          = result.get("answer", "Sorry, I couldn't generate a response.")
+                    mode            = result.get("mode", "fallback")
+                    retrieved_chunks = result.get("retrieved_chunks", 0)
+                    total_chunks    = result.get("total_chunks", 0)
                 else:
-                    answer = f"Error {resp.status_code}: {resp.text[:200]}"
-                    mode   = "fallback"
+                    answer          = f"Error {resp.status_code}: {resp.text[:200]}"
+                    mode            = "fallback"
+                    retrieved_chunks = 0
+                    total_chunks    = 0
             except requests.exceptions.ConnectionError:
-                answer = "❌ Cannot connect to the backend API. Please make sure it's running."
-                mode   = "fallback"
+                answer          = "❌ Cannot connect to the backend API. Please make sure it's running."
+                mode            = "fallback"
+                retrieved_chunks = 0
+                total_chunks    = 0
             except Exception as e:
-                answer = f"❌ Error: {str(e)}"
-                mode   = "fallback"
+                answer          = f"❌ Error: {str(e)}"
+                mode            = "fallback"
+                retrieved_chunks = 0
+                total_chunks    = 0
 
         st.session_state["chat_history"].append({
-            "role": "assistant",
-            "content": answer,
-            "mode": mode,
+            "role":             "assistant",
+            "content":          answer,
+            "mode":             mode,
+            "retrieved_chunks": retrieved_chunks,
+            "total_chunks":     total_chunks,
         })
         st.rerun()
 

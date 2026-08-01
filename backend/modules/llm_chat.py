@@ -1,18 +1,41 @@
 """
-LLM Chat Module – PaperIQ
-Provides a chatbot interface for Q&A over an analyzed research paper.
-Uses Google Gemini API (gemini-2.0-flash) as the primary LLM.
-Falls back to a rule-based responder if no API key is configured.
+LLM Chat Module – PaperIQ  (RAG-powered)
+=========================================
+Architecture
+------------
+  User Question
+       │
+       ▼
+  RAGEngine.retrieve()          ← embed question + cosine search over paper chunks
+       │
+       ▼
+  Top-K relevant passages       ← the "retrieved" part of RAG
+       │
+       ▼
+  build_rag_prompt()            ← inject passages + metadata into LLM context
+       │
+       ▼
+  Gemini 2.0 Flash generate()   ← grounded, citation-aware answer
+       │
+       ▼
+  {answer, mode, retrieved_chunks, total_chunks}
+
+Falls back to rule-based responder when no API key is configured.
 """
 
 import os
 import re
 from typing import List, Dict, Optional
 
+from modules.rag_engine import RAGEngine
 
-# ──────────────────────────────────────────────
-# Gemini Client (lazy-loaded)
-# ──────────────────────────────────────────────
+# Singleton retrieval engine (shared model weights with SimilarityEngine)
+_rag = RAGEngine()
+
+
+# ──────────────────────────────────────────────────────────
+# Gemini client (lazy-loaded)
+# ──────────────────────────────────────────────────────────
 
 def _get_gemini_client():
     """Return a configured Gemini GenerativeModel, or None if unavailable."""
@@ -20,7 +43,7 @@ def _get_gemini_client():
     if not api_key:
         return None
     try:
-        import google.generativeai as genai  # type: ignore
+        import google.generativeai as genai          # type: ignore
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.0-flash")
         return model
@@ -28,62 +51,74 @@ def _get_gemini_client():
         return None
 
 
-# ──────────────────────────────────────────────
-# System prompt builder from analysis data
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
+# RAG-augmented prompt builder
+# ──────────────────────────────────────────────────────────
 
-def build_system_prompt(paper_context: dict) -> str:
-    """Build a rich system prompt from the paper's analysis result."""
-    title = paper_context.get("title", "Unknown Paper")
-    domain = paper_context.get("domain", {}).get("primary_domain", "N/A")
-    summaries = paper_context.get("summaries", {})
-    overall = summaries.get("overall", "")
-    methodology = summaries.get("methodology", "")
-    results = summaries.get("results", "")
-    conclusion = summaries.get("conclusion", "")
-    contributions = paper_context.get("contributions", [])
-    gaps = paper_context.get("gaps", {}).get("identified_gaps", [])
-    kws = paper_context.get("keywords", {}).get("top_keywords", [])
-    top_keywords = ", ".join([k["keyword"] for k in kws[:10]]) if kws else "N/A"
-    ideas = paper_context.get("ideas", {})
+def build_rag_prompt(
+    question: str,
+    paper_context: dict,
+    retrieved_chunks: List[Dict],
+    chat_history: List[Dict],
+) -> str:
+    """
+    Construct the full prompt sent to Gemini.
+
+    Structure
+    ---------
+    1. System role  – who PaperIQ is and what it must do
+    2. Paper metadata – title, domain, quality score, keywords (structured summary)
+    3. RETRIEVED CONTEXT – top-K passages returned by the RAG engine
+       (this is the core RAG augmentation step)
+    4. Conversation history – last 6 turns for multi-turn coherence
+    5. Current question
+    """
+    title   = paper_context.get("title", "Unknown Paper")
+    domain  = paper_context.get("domain", {}).get("primary_domain", "N/A")
     quality = paper_context.get("quality", {})
-    score = quality.get("composite_score", "N/A")
-    grade = quality.get("grade", "N/A")
+    score   = quality.get("composite_score", "N/A")
+    grade   = quality.get("grade", "N/A")
+    kws     = paper_context.get("keywords", {}).get("top_keywords", [])
+    top_kw  = ", ".join(k["keyword"] for k in kws[:10]) if kws else "N/A"
+    contribs = paper_context.get("contributions", [])
+    gaps     = paper_context.get("gaps", {}).get("identified_gaps", [])
     sections = paper_context.get("sections", {})
-    abstract = sections.get("abstract", "")[:800]
+    abstract = sections.get("abstract", "")[:600]
 
-    contributions_text = "\n".join(f"- {c}" for c in contributions[:5]) if contributions else "N/A"
-    gaps_text = "\n".join(f"- {g}" for g in gaps[:5]) if gaps else "N/A"
-    research_ideas = ideas.get("research_extensions", [])
-    ideas_text = "\n".join(f"- {i}" for i in research_ideas[:4]) if research_ideas else "N/A"
+    contributions_text = "\n".join(f"  • {c}" for c in contribs[:5]) or "  N/A"
+    gaps_text          = "\n".join(f"  • {g}" for g in gaps[:5])     or "  N/A"
 
-    return f"""You are PaperIQ Assistant, an expert AI research assistant specializing in academic paper analysis.
+    # ── Retrieved passages block ──
+    if retrieved_chunks:
+        rag_block_lines = []
+        for i, item in enumerate(retrieved_chunks, 1):
+            score_pct = int(item["score"] * 100)
+            rag_block_lines.append(
+                f"[Passage {i} | relevance {score_pct}%]\n{item['chunk']}"
+            )
+        rag_block = "\n\n".join(rag_block_lines)
+    else:
+        rag_block = "(No highly relevant passages found for this query.)"
 
-You have been provided with a fully analyzed research paper. Your job is to answer questions about this specific paper accurately, helpfully, and concisely. Always base your answers on the paper context provided below.
+    # ── Conversation history block ──
+    history_text = ""
+    for msg in list(chat_history or [])[-6:]:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        history_text += f"\n{role}: {msg['content']}"
+
+    return f"""You are PaperIQ Assistant, an expert AI research assistant.
+You answer questions about a specific research paper using ONLY information from the paper.
 
 ═══════════════════════════════════════════
-PAPER ANALYSIS CONTEXT
+PAPER METADATA
 ═══════════════════════════════════════════
-
-📄 Title: {title}
-🌐 Domain: {domain}
-⭐ Quality Score: {score}/100 (Grade: {grade})
-🏷️ Top Keywords: {top_keywords}
+📄 Title  : {title}
+🌐 Domain : {domain}
+⭐ Quality : {score}/100  (Grade: {grade})
+🏷️ Keywords: {top_kw}
 
 📝 Abstract:
 {abstract}
-
-📋 Overall Summary:
-{overall}
-
-🔬 Methodology:
-{methodology}
-
-📈 Results:
-{results}
-
-🏁 Conclusion:
-{conclusion}
 
 💡 Key Contributions:
 {contributions_text}
@@ -91,31 +126,42 @@ PAPER ANALYSIS CONTEXT
 🚩 Research Gaps:
 {gaps_text}
 
-🔭 Suggested Research Ideas:
-{ideas_text}
+═══════════════════════════════════════════
+RETRIEVED CONTEXT  (RAG – semantic search results)
+═══════════════════════════════════════════
+The following passages were retrieved from the paper because they are most
+semantically relevant to the user's question. Ground your answer in these
+passages. If they do not contain enough information, say so.
+
+{rag_block}
+
+═══════════════════════════════════════════
+CONVERSATION HISTORY
+═══════════════════════════════════════════{history_text if history_text else chr(10) + "(No prior conversation)"}
 
 ═══════════════════════════════════════════
 INSTRUCTIONS
 ═══════════════════════════════════════════
+- Base your answer primarily on the RETRIEVED CONTEXT passages above.
+- Use the Paper Metadata for high-level facts (domain, score, keywords, gaps).
+- Be concise but thorough; use bullet points where helpful.
+- If the retrieved passages don't answer the question, say: "The paper doesn't
+  appear to cover this directly." Do NOT hallucinate.
+- Maintain an academic, helpful tone.
 
-- Answer questions based on the paper context above.
-- If asked something not covered by the paper, say so honestly.
-- Be concise but thorough. Use bullet points where helpful.
-- When suggesting research ideas, be specific and actionable.
-- Always maintain a helpful, academic tone.
-- Do NOT make up information not present in the paper context.
-"""
+User: {question}
+Assistant:"""
 
 
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
 # Rule-based fallback (no API key)
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
 
 def _rule_based_response(question: str, paper_context: dict) -> str:
     """Simple keyword-based fallback when no LLM is available."""
-    q = question.lower()
+    q        = question.lower()
     summaries = paper_context.get("summaries", {})
-    sections = paper_context.get("sections", {})
+    sections  = paper_context.get("sections", {})
 
     if any(w in q for w in ["summary", "about", "overview", "describe", "what is"]):
         text = summaries.get("overall") or sections.get("abstract", "")
@@ -193,9 +239,9 @@ def _rule_based_response(question: str, paper_context: dict) -> str:
     )
 
 
-# ──────────────────────────────────────────────
-# Main chat function
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
+# Main chat function  (RAG pipeline entry point)
+# ──────────────────────────────────────────────────────────
 
 def chat_with_paper(
     question: str,
@@ -203,51 +249,69 @@ def chat_with_paper(
     chat_history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict:
     """
-    Send a question to the LLM (or fallback) about the paper.
+    Full RAG pipeline:
+      1. Retrieve  – semantic search over paper chunks for the question
+      2. Augment   – inject retrieved passages into the prompt
+      3. Generate  – Gemini 2.0 Flash produces a grounded answer
 
     Args:
-        question: The user's question.
-        paper_context: The full analysis result from analyze_paper_bytes().
-        chat_history: List of {"role": "user"/"assistant", "content": "..."} dicts.
+        question:      The user's natural-language question.
+        paper_context: Full analysis result from analyze_paper_bytes().
+        chat_history:  List of {"role": "user"/"assistant", "content": "…"}.
 
     Returns:
-        {"answer": str, "mode": "gemini" | "fallback"}
+        {
+          "answer":           str,
+          "mode":             "rag-gemini" | "fallback",
+          "retrieved_chunks": int,   # how many passages were retrieved
+          "total_chunks":     int,   # total indexed passages
+        }
     """
     if chat_history is None:
         chat_history = []
 
+    # ── Step 1: RETRIEVE relevant passages ────────────────
+    retrieved_passages, total_chunks = _rag.retrieve_for_query(
+        query=question,
+        paper_context=paper_context,
+        top_k=5,
+    )
+
+    # ── Step 2: GENERATE with Gemini (augmented prompt) ───
     model = _get_gemini_client()
 
     if model is not None:
         try:
-            system_prompt = build_system_prompt(paper_context)
-
-            # Build conversation history for multi-turn context
-            history_text = ""
-            history_items = list(chat_history or [])[-6:]  # last 6 turns for context
-            for msg in history_items:
-                role = "User" if msg["role"] == "user" else "Assistant"
-                history_text += f"\n{role}: {msg['content']}"
-
-            full_prompt = (
-                system_prompt
-                + "\n\n═══ CONVERSATION HISTORY ═══"
-                + (history_text if history_text else "\n(No prior conversation)")
-                + f"\n\nUser: {question}\nAssistant:"
+            prompt = build_rag_prompt(
+                question=question,
+                paper_context=paper_context,
+                retrieved_chunks=retrieved_passages,
+                chat_history=chat_history,
             )
 
-            response = model.generate_content(full_prompt)
-            answer = response.text.strip()
-            return {"answer": answer, "mode": "gemini"}
+            response = model.generate_content(prompt)
+            answer   = response.text.strip()
+
+            return {
+                "answer":           answer,
+                "mode":             "rag-gemini",
+                "retrieved_chunks": len(retrieved_passages),
+                "total_chunks":     total_chunks,
+            }
 
         except Exception as e:
-            # Fall through to rule-based
-            fallback_answer = _rule_based_response(question, paper_context)
+            # Gemini failed → rule-based fallback
             return {
-                "answer": fallback_answer,
-                "mode": "fallback",
-                "note": f"Gemini error: {str(e)}"
+                "answer":           _rule_based_response(question, paper_context),
+                "mode":             "fallback",
+                "retrieved_chunks": len(retrieved_passages),
+                "total_chunks":     total_chunks,
+                "note":             f"Gemini error: {e}",
             }
     else:
-        answer = _rule_based_response(question, paper_context)
-        return {"answer": answer, "mode": "fallback"}
+        return {
+            "answer":           _rule_based_response(question, paper_context),
+            "mode":             "fallback",
+            "retrieved_chunks": len(retrieved_passages),
+            "total_chunks":     total_chunks,
+        }
