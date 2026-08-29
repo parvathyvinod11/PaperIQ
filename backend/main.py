@@ -46,6 +46,8 @@ from modules.quality_scorer import QualityScorer
 from modules.idea_generator import IdeaGenerator
 from modules.paper_comparator import PaperComparator
 from modules.llm_chat import chat_with_paper
+from modules.vector_store import VectorStore
+from modules.rag_engine import RAGEngine
 
 # ──────────────────────────────────────────────────────────
 # App setup
@@ -89,6 +91,8 @@ trend_analyzer = TrendAnalyzer()
 quality_scorer = QualityScorer()
 idea_generator = IdeaGenerator()
 comparator = PaperComparator()
+vector_store = VectorStore()
+rag_engine = RAGEngine()
 
 # ──────────────────────────────────────────────────────────
 # Helper: full pipeline for a single PDF
@@ -303,6 +307,85 @@ async def semantic_search(
         reverse=True,
     )
     return JSONResponse(content={"query": query, "results": results})
+
+
+# ──────────────────────────────────────────────────────────
+# Vector index management endpoints
+# ──────────────────────────────────────────────────────────
+
+@app.post("/api/index")
+async def index_paper(
+    file: UploadFile = File(...),
+    token: Optional[HTTPAuthorizationCredentials] = Depends(security)
+):
+    """
+    Pre-build and persist a FAISS vector index for a PDF.
+
+    If the same paper has been indexed before (matched by SHA-256 of its
+    corpus text) the call returns immediately with cached=true – no
+    re-embedding happens.  This endpoint is optional; the /api/chat
+    endpoint will build the index on first use automatically.
+
+    Returns:
+        { paper_id, total_chunks, cached, store_path }
+    """
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) < 1000:
+        raise HTTPException(status_code=400, detail="Uploaded file is too small or empty.")
+
+    try:
+        # Extract text from the PDF
+        pdf_result = pdf_processor.process(pdf_bytes)
+        text = pdf_result["cleaned_text"]
+
+        # Build a minimal paper_context so RAGEngine can extract the corpus
+        sections = section_id.extract_sections(text)
+        summaries = summarizer.summarize_sections(sections)
+        paper_context = {"sections": sections, "summaries": summaries}
+
+        corpus = rag_engine.extract_corpus(paper_context)
+        paper_id = vector_store.paper_id_from_text(corpus)
+
+        cached = vector_store.has(paper_id)
+
+        if not cached:
+            # Embed chunks and persist FAISS index to disk
+            chunks, embeddings = rag_engine.build_index(paper_context)
+            total_chunks = len(chunks)
+        else:
+            _, chunks = vector_store.load(paper_id)
+            total_chunks = len(chunks) if chunks else 0
+
+        return JSONResponse(content={
+            "paper_id": paper_id,
+            "total_chunks": total_chunks,
+            "cached": cached,
+            "store_path": str(vector_store.store_dir),
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
+
+
+@app.get("/api/index/{paper_id}")
+async def get_index_info(paper_id: str):
+    """
+    Check whether a FAISS index exists for the given paper_id and return its metadata.
+
+    Returns:
+        { paper_id, exists, total_chunks, dim, ntotal }
+    """
+    info = vector_store.info(paper_id)
+    return JSONResponse(content=info)
+
+
+@app.get("/api/indexes")
+async def list_indexes():
+    """List all paper_ids that have a persisted FAISS index."""
+    ids = vector_store.list_indexes()
+    return JSONResponse(content={"paper_ids": ids, "count": len(ids)})
 
 
 # ──────────────────────────────────────────────────────────

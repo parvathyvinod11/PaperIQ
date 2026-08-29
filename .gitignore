@@ -13,3 +13,6 @@ __pycache__/
 
 # environment variables (contains secrets/API keys)
 .env
+
+# FAISS vector indexes (auto-generated, can be rebuilt)
+vector_store/
